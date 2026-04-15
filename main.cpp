@@ -1,107 +1,170 @@
-#include <cerrno>
-#include <libinput.h>
-#include <libudev.h>
+#include <libevdev/libevdev.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <poll.h>
 #include <cstdio>
-
-static int open_restricted(const char *path, int flags, void *) {
-    int fd = open(path, flags);
-    return fd < 0 ? -errno : fd;
-}
-
-static void close_restricted(int fd, void *) {
-    close(fd);
-}
-
-static const libinput_interface interface = {
-    open_restricted,
-    close_restricted,
-};
+#include <unordered_map>
+#include <string>
+#include <filesystem>
+#include <stdexcept>
+#include "main.h"
 
 int main() {
-    struct udev *udev = udev_new();
+    std::string path_to_touchpad = find_touchpad();
+    printf("Device: %s\n", path_to_touchpad.c_str());
 
-    struct libinput *li = libinput_udev_create_context(&interface, nullptr, udev);
-    libinput_udev_assign_seat(li, "seat0");
+    int file_descriptor = open(path_to_touchpad.c_str(), O_RDONLY);
 
-    int fd = libinput_get_fd(li); // fd for poll/epoll
+    if (file_descriptor < 0) {
+        perror("open");
+        return 1;
+    }
+
+    struct libevdev *dev = nullptr;
+
+    if (libevdev_new_from_fd(file_descriptor, &dev) < 0) {
+        perror("libevdev_new_from_fd");
+        return 1;
+    }
+
+    printf("Model: %s\n", libevdev_get_name(dev));
+
+    const struct input_absinfo *ax = libevdev_get_abs_info(dev, ABS_MT_POSITION_X);
+    const struct input_absinfo *ay = libevdev_get_abs_info(dev, ABS_MT_POSITION_Y);
+
+    int size_x = ax ? ax->resolution : 0;
+    int size_y = ay ? ay->resolution : 0;
+
+    int fingers_count = libevdev_get_num_slots(dev);
+
+    if (fingers_count <= 0) {
+        fingers_count = 10;
+    }
+
+    printf("Fingers: %d\n\n", fingers_count);
+
+    std::unordered_map<int, Finger> fingers;
+
+    for (int finger_id = 0; finger_id < fingers_count; finger_id++) {
+        fingers[finger_id] = {};
+    }
+
+    int current_slot = 0;
+
+    struct input_event input;
 
     while (true) {
-        struct pollfd pfd = {fd, POLLIN, 0};
-        poll(&pfd, 1, -1);
+        int return_code = libevdev_next_event(dev,LIBEVDEV_READ_FLAG_NORMAL | LIBEVDEV_READ_FLAG_BLOCKING, &input);
 
-        libinput_dispatch(li);
+        if (return_code == LIBEVDEV_READ_STATUS_SYNC) {
+            while (libevdev_next_event(dev, LIBEVDEV_READ_FLAG_SYNC, &input) == LIBEVDEV_READ_STATUS_SYNC);
+            continue;
+        }
 
-        struct libinput_event *ev;
-        while ((ev = libinput_get_event(li)) != nullptr) {
-            switch (libinput_event_get_type(ev)) {
-                case LIBINPUT_EVENT_TOUCH_DOWN: {
-                    auto *t = libinput_event_get_touch_event(ev);
-                    int slot = libinput_event_touch_get_slot(t); // Finger ID
-                    double x = libinput_event_touch_get_x(t); // Offsets
-                    double y = libinput_event_touch_get_y(t);
-                    double nx = libinput_event_touch_get_x_transformed(t, 1920);
-                    double ny = libinput_event_touch_get_y_transformed(t, 1080);
-                    printf("TOUCH_DOWN  slot=%d  x=%.1f y=%.1f\n", slot, x, y);
-                    break;
-                }
-                case LIBINPUT_EVENT_TOUCH_MOTION: {
-                    auto *t = libinput_event_get_touch_event(ev);
-                    int slot = libinput_event_touch_get_slot(t);
-                    double x = libinput_event_touch_get_x(t);
-                    double y = libinput_event_touch_get_y(t);
-                    printf("TOUCH_MOVE  slot=%d  x=%.1f y=%.1f\n", slot, x, y);
-                    break;
-                }
-                case LIBINPUT_EVENT_TOUCH_UP: {
-                    auto *t = libinput_event_get_touch_event(ev);
-                    int slot = libinput_event_touch_get_slot(t);
-                    printf("TOUCH_UP    slot=%d\n", slot);
-                    break;
-                }
-                case LIBINPUT_EVENT_TOUCH_FRAME:
-                    printf("TOUCH_FRAME\n");
-                    break;
+        if (return_code < 0) {
+            break;
+        }
 
-                case LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN: {
-                    auto *g = libinput_event_get_gesture_event(ev);
-                    int fingers = libinput_event_gesture_get_finger_count(g);
-                    printf("SWIPE_BEGIN  fingers=%d\n", fingers);
-                    break;
-                }
-                case LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE: {
-                    auto *g = libinput_event_get_gesture_event(ev);
-                    double dx = libinput_event_gesture_get_dx(g);
-                    double dy = libinput_event_gesture_get_dy(g);
-                    double dx_unaccel = libinput_event_gesture_get_dx_unaccelerated(g);
-                    double dy_unaccel = libinput_event_gesture_get_dy_unaccelerated(g);
-                    printf("SWIPE_UPDATE dx=%.2f dy=%.2f\n", dx, dy);
-                    break;
-                }
-                case LIBINPUT_EVENT_GESTURE_SWIPE_END: {
-                    auto *g = libinput_event_get_gesture_event(ev);
-                    bool cancelled = libinput_event_gesture_get_cancelled(g);
-                    printf("SWIPE_END  cancelled=%d\n", cancelled);
-                    break;
-                }
-                case LIBINPUT_EVENT_GESTURE_PINCH_UPDATE: {
-                    auto *g = libinput_event_get_gesture_event(ev);
-                    double scale = libinput_event_gesture_get_scale(g); // 1.0
-                    double angle = libinput_event_gesture_get_angle_delta(g);
-                    printf("PINCH scale=%.3f angle=%.1f\n", scale, angle);
-                    break;
-                }
+        switch (input.type) {
+            case EV_ABS:
+                switch (input.code) {
+                    case ABS_MT_SLOT:
+                        current_slot = input.value;
+                        break;
 
-                default:
-                    break;
-            }
+                    case ABS_MT_TRACKING_ID:
+                        if (input.value == -1) {
+                            printf("  [slot %d] FINGER UP (id=%d)\n", current_slot, fingers[current_slot].id);
+                            fingers[current_slot].id = -1;
+                        } else {
+                            fingers[current_slot].id = input.value;
+                            printf("  [slot %d] FINGER DOWN (id=%d)\n", current_slot, input.value);
+                        }
+                        break;
 
-            libinput_event_destroy(ev);
+                    case ABS_MT_POSITION_X:
+                        fingers[current_slot].x = input.value;
+                        fingers[current_slot].is_updated = true;
+                        break;
+
+                    case ABS_MT_POSITION_Y:
+                        fingers[current_slot].y = input.value;
+                        fingers[current_slot].is_updated = true;
+                        break;
+                }
+                break;
+
+            case EV_SYN:
+                if (input.code == SYN_REPORT) {
+                    bool is_any_changed = false;
+
+                    for (auto &[slot, finger]: fingers) {
+                        if (!finger.is_updated || finger.id == -1) {
+                            continue;
+                        }
+
+                        is_any_changed = true;
+
+                        if (size_x > 0 && size_y > 0) {
+                            printf("  [slot %d] MOVE  x=%.1fmm  y=%.1fmm\n", slot, static_cast<double>(finger.x) / size_x, static_cast<double>(finger.y) / size_y);
+                        } else {
+                            printf("  [slot %d] MOVE  x=%d  y=%d  (raw, unknown resolution)\n", slot, finger.x, finger.y);
+                        }
+
+                        finger.is_updated = false;
+                    }
+
+                    if (is_any_changed) {
+                        int active_fingers_count = 0;
+
+                        for (auto &[slot, finger]: fingers) {
+                            if (finger.id != -1) {
+                                active_fingers_count++;
+                            }
+                        }
+
+                        printf("  --- FRAME  active_fingers=%d ---\n", active_fingers_count);
+                    }
+                }
+                break;
         }
     }
 
-    libinput_unref(li);
-    udev_unref(udev);
+    libevdev_free(dev);
+    close(file_descriptor);
+}
+
+std::string find_touchpad() {
+    for (auto &current_input_device: std::filesystem::directory_iterator("/dev/input")) {
+        if (!current_input_device.is_character_file()) {
+            continue;
+        }
+
+        std::string path_to_input_device = current_input_device.path().string();
+
+        if (path_to_input_device.find("event") == std::string::npos) {
+            continue;
+        }
+
+        int file_descriptor = open(path_to_input_device.c_str(), O_RDONLY | O_NONBLOCK);
+
+        if (file_descriptor < 0) {
+            continue;
+        }
+
+        struct libevdev *device = nullptr;
+
+        if (libevdev_new_from_fd(file_descriptor, &device) == 0) {
+            bool is_touchpad = libevdev_has_event_code(device, EV_KEY, BTN_TOOL_FINGER) && libevdev_has_event_code(device, EV_ABS, ABS_MT_POSITION_X);
+            libevdev_free(device);
+
+            if (is_touchpad) {
+                close(file_descriptor);
+                return path_to_input_device;
+            }
+        }
+
+        close(file_descriptor);
+    }
+
+    throw std::runtime_error("Touchpad not found in /dev/input/");
 }

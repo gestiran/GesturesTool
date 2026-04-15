@@ -4,17 +4,10 @@ project(GesturesTool)
 set(CMAKE_CXX_STANDARD 17)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBINPUT REQUIRED libinput)
-pkg_check_modules(LIBUDEV REQUIRED libudev)
+pkg_check_modules(LIBEVDEV REQUIRED libevdev)
 
-add_executable(GesturesTool main.cpp)
+add_executable(GesturesTool main.cpp
+        main.h)
 
-target_include_directories(GesturesTool PRIVATE
-        ${LIBINPUT_INCLUDE_DIRS}
-        ${LIBUDEV_INCLUDE_DIRS}
-)
-
-target_link_libraries(GesturesTool PRIVATE
-        ${LIBINPUT_LIBRARIES}
-        ${LIBUDEV_LIBRARIES}
-)
+target_include_directories(GesturesTool PRIVATE ${LIBEVDEV_INCLUDE_DIRS})
+target_link_libraries(GesturesTool PRIVATE ${LIBEVDEV_LIBRARIES})
